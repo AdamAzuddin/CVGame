@@ -1,0 +1,336 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Power Poses - AI Game</title>
+    
+    <link href="https://fonts.googleapis.com/css2?family=Fredoka+One&display=swap" rel="stylesheet">
+
+    <style>
+        body {
+            font-family: 'Fredoka One', cursive;
+            background-color: #2c3e50;
+            color: white;
+            text-align: center;
+            margin: 0;
+            overflow: hidden;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            height: 100vh;
+        }
+
+        h1 { font-size: 3rem; margin: 10px; color: #e74c3c; text-shadow: 2px 2px #c0392b; }
+
+        #game-container {
+            position: relative;
+            width: 640px;
+            height: 480px;
+            border: 8px solid #ecf0f1;
+            border-radius: 20px;
+            box-shadow: 0 10px 30px rgba(0,0,0,0.5);
+            background: #000;
+            overflow: hidden;
+        }
+
+        video {
+            position: absolute;
+            top: 0; left: 0;
+            width: 100%; height: 100%;
+            transform: scaleX(-1);
+            object-fit: cover;
+        }
+
+        canvas {
+            position: absolute;
+            top: 0; left: 0;
+            width: 100%; height: 100%;
+            transform: scaleX(-1);
+        }
+
+        #ui-layer {
+            position: absolute;
+            top: 0; left: 0;
+            width: 100%; height: 100%;
+            pointer-events: none;
+            display: flex;
+            flex-direction: column;
+            justify-content: space-between;
+            padding: 20px;
+            box-sizing: border-box;
+        }
+
+        .hud-top { display: flex; justify-content: space-between; font-size: 2rem; }
+        .score-box { color: #2ecc71; text-shadow: 2px 2px #000; }
+        .time-box { color: #f1c40f; text-shadow: 2px 2px #000; }
+
+        #target-display {
+            font-size: 8rem;
+            text-shadow: 0 0 20px rgba(255,255,255,0.8);
+            animation: pop 0.3s ease;
+        }
+
+        #start-screen, #game-over-screen {
+            position: absolute;
+            top: 0; left: 0;
+            width: 100%; height: 100%;
+            background: rgba(44, 62, 80, 0.9);
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            z-index: 10;
+        }
+
+        button {
+            font-family: 'Fredoka One', cursive;
+            font-size: 2rem;
+            padding: 15px 40px;
+            background-color: #e74c3c;
+            color: white;
+            border: none;
+            border-radius: 50px;
+            cursor: pointer;
+            transition: transform 0.1s;
+            box-shadow: 0 5px #c0392b;
+        }
+
+        button:active { transform: translateY(4px); box-shadow: 0 1px #c0392b; }
+        .hidden { display: none !important; }
+
+        @keyframes pop {
+            0% { transform: scale(0.5); opacity: 0; }
+            80% { transform: scale(1.2); opacity: 1; }
+            100% { transform: scale(1); }
+        }
+    </style>
+</head>
+<body>
+
+    <h1>⚡ Power Poses ⚡</h1>
+
+    <div id="game-container">
+        <video id="webcam" autoplay playsinline></video>
+        <canvas id="output_canvas"></canvas>
+        
+        <div id="ui-layer">
+            <div class="hud-top">
+                <div class="score-box">Score: <span id="score">0</span></div>
+                <div class="time-box">Time: <span id="timer">30</span></div>
+            </div>
+            <div id="target-display"></div>
+            <div></div>
+        </div>
+
+        <div id="start-screen">
+            <h2 style="font-size: 3rem; margin-bottom: 20px;">Ready?</h2>
+            <p style="font-size: 1.5rem; margin-bottom: 30px;">Step back and match the pose!</p>
+            <button id="start-btn" disabled>Loading AI...</button>
+        </div>
+
+        <div id="game-over-screen" class="hidden">
+            <h2 style="font-size: 3rem; color: #e74c3c;">Time's Up!</h2>
+            <p style="font-size: 2rem;">Final Score: <span id="final-score">0</span></p>
+            <button onclick="location.reload()">Play Again</button>
+        </div>
+    </div>
+
+    <script type="module">
+        import {
+            PoseLandmarker,
+            FilesetResolver,
+            DrawingUtils
+        } from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.3";
+
+        const video = document.getElementById("webcam");
+        const canvasElement = document.getElementById("output_canvas");
+        const canvasCtx = canvasElement.getContext("2d");
+        const startBtn = document.getElementById("start-btn");
+        const targetDisplay = document.getElementById("target-display");
+        const scoreEl = document.getElementById("score");
+        const timerEl = document.getElementById("timer");
+        const finalScoreEl = document.getElementById("final-score");
+        
+        let poseLandmarker;
+        let lastVideoTime = -1;
+        let score = 0;
+        let timeLeft = 20;
+        let gameActive = false;
+        let currentTarget = null;
+
+        // Heuristics for detecting poses based on landmarks
+        // 11=L_Shoulder, 12=R_Shoulder, 13=L_Elbow, 14=R_Elbow, 15=L_Wrist, 16=R_Wrist
+        const GESTURES = [
+            {
+                name: "T-Pose",
+                emoji: "🦅", 
+                check: (lm) => {
+                    // Wrists and elbows roughly same height as shoulders
+                    const horizontalL = Math.abs(lm[15].y - lm[11].y) < 0.15;
+                    const horizontalR = Math.abs(lm[16].y - lm[12].y) < 0.15;
+                    // Arms extended (wrists far from shoulders)
+                    const extended = Math.abs(lm[15].x - lm[11].x) > 0.1 && Math.abs(lm[16].x - lm[12].x) > 0.1;
+                    return horizontalL && horizontalR && extended;
+                }
+            },
+            {
+                name: "Victory",
+                emoji: "🙌",
+                check: (lm) => {
+                    // Wrists significantly above shoulders
+                    return lm[15].y < lm[11].y - 0.15 && lm[16].y < lm[12].y - 0.15;
+                }
+            },
+            {
+                name: "Flex",
+                emoji: "💪",
+                check: (lm) => {
+                    // Elbows near shoulder height, Wrists above elbows
+                    const elbowsUp = Math.abs(lm[13].y - lm[11].y) < 0.2 && Math.abs(lm[14].y - lm[12].y) < 0.2;
+                    const wristsUp = lm[15].y < lm[13].y && lm[16].y < lm[14].y;
+                    return elbowsUp && wristsUp;
+                }
+            },
+            {
+                name: "X-Factor",
+                emoji: "🙅",
+                check: (lm) => {
+                    // Wrists close to each other (crossed)
+                    const wristsClose = Math.abs(lm[15].x - lm[16].x) < 0.15;
+                    // Wrists not too low (above stomach)
+                    const wristsHigh = lm[15].y < lm[11].y + 0.3;
+                    return wristsClose && wristsHigh;
+                }
+            },
+            {
+                name: "Namaste",
+                emoji: "🙏",
+                check: (lm) => {
+                    // Wrists close together
+                    const close = Math.abs(lm[15].x - lm[16].x) < 0.15;
+                    // Hands roughly at chest level (below nose, above hips)
+                    const height = lm[15].y > lm[0].y && lm[15].y < lm[23].y;
+                    return close && height;
+                }
+            },
+            {
+                name: "Salute",
+                emoji: "🫡",
+                check: (lm) => {
+                    // Right wrist (16) near Right Ear (8)
+                    const handNearHead = Math.abs(lm[16].x - lm[8].x) < 0.2 && Math.abs(lm[16].y - lm[8].y) < 0.2;
+                    return handNearHead;
+                }
+            },
+            {
+                name: "Hero",
+                emoji: "🦸",
+                check: (lm) => {
+                    // Wrists (15,16) near Hips (23,24)
+                    const lHip = Math.abs(lm[15].x - lm[23].x) < 0.2 && Math.abs(lm[15].y - lm[23].y) < 0.2;
+                    const rHip = Math.abs(lm[16].x - lm[24].x) < 0.2 && Math.abs(lm[16].y - lm[24].y) < 0.2;
+                    return lHip && rHip;
+                }
+            }
+        ];
+
+        const createPoseLandmarker = async () => {
+            const vision = await FilesetResolver.forVisionTasks(
+                "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.3/wasm"
+            );
+            poseLandmarker = await PoseLandmarker.createFromOptions(vision, {
+                baseOptions: {
+                    modelAssetPath: `https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/1/pose_landmarker_lite.task`,
+                    delegate: "GPU"
+                },
+                runningMode: "VIDEO",
+                numPoses: 1
+            });
+            startBtn.innerText = "START GAME";
+            startBtn.disabled = false;
+            startBtn.addEventListener("click", startGame);
+        };
+        createPoseLandmarker();
+
+        if (navigator.mediaDevices && navigator.mediaDevices.getUserMedia) {
+            navigator.mediaDevices.getUserMedia({ video: true }).then((stream) => {
+                video.srcObject = stream;
+                video.addEventListener("loadeddata", predictWebcam);
+            });
+        }
+
+        function startGame() {
+            document.getElementById("start-screen").classList.add("hidden");
+            score = 0;
+            timeLeft = 20;
+            scoreEl.innerText = score;
+            gameActive = true;
+            pickNewTarget();
+            
+            const timerInterval = setInterval(() => {
+                timeLeft--;
+                timerEl.innerText = timeLeft;
+                if (timeLeft <= 0) {
+                    clearInterval(timerInterval);
+                    endGame();
+                }
+            }, 1000);
+        }
+
+        function pickNewTarget() {
+            const random = GESTURES[Math.floor(Math.random() * GESTURES.length)];
+            currentTarget = random;
+            targetDisplay.innerText = random.emoji;
+            targetDisplay.style.animation = 'none';
+            targetDisplay.offsetHeight; 
+            targetDisplay.style.animation = 'pop 0.3s ease';
+        }
+
+        function endGame() {
+            gameActive = false;
+            document.getElementById("game-over-screen").classList.remove("hidden");
+            finalScoreEl.innerText = score;
+        }
+
+        async function predictWebcam() {
+            canvasElement.style.width = video.videoWidth;
+            canvasElement.style.height = video.videoHeight;
+            canvasElement.width = video.videoWidth;
+            canvasElement.height = video.videoHeight;
+
+            if (poseLandmarker && gameActive) {
+                let startTimeMs = performance.now();
+                if (video.currentTime !== lastVideoTime) {
+                    lastVideoTime = video.currentTime;
+                    const results = poseLandmarker.detectForVideo(video, startTimeMs);
+
+                    canvasCtx.clearRect(0, 0, canvasElement.width, canvasElement.height);
+
+                    if (results.landmarks.length > 0) {
+                        const landmarks = results.landmarks[0];
+                        
+                        // Draw Skeleton
+                        const drawingUtils = new DrawingUtils(canvasCtx);
+                        drawingUtils.drawConnectors(landmarks, PoseLandmarker.POSE_CONNECTIONS, { color: "#00FF00", lineWidth: 4 });
+                        drawingUtils.drawLandmarks(landmarks, { color: "#FF0000", lineWidth: 2, radius: 3 });
+
+                        // Check Pose
+                        if (currentTarget && currentTarget.check(landmarks)) {
+                            score++;
+                            scoreEl.innerText = score;
+                            document.getElementById("game-container").style.borderColor = "#2ecc71";
+                            setTimeout(() => {
+                                document.getElementById("game-container").style.borderColor = "#ecf0f1";
+                            }, 200);
+                            pickNewTarget();
+                        }
+                    }
+                }
+            }
+            window.requestAnimationFrame(predictWebcam);
+        }
+    </script>
+</body>
+</html>
