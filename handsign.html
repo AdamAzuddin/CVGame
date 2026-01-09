@@ -162,7 +162,7 @@
         let runningMode = "VIDEO";
         let lastVideoTime = -1;
         let score = 0;
-        let timeLeft = 20;
+        let timeLeft = 30;
         let gameActive = false;
         let currentTarget = "";
         
@@ -210,7 +210,7 @@
         function startGame() {
             document.getElementById("start-screen").classList.add("hidden");
             score = 0;
-            timeLeft = 20;
+            timeLeft = 30;
             scoreEl.innerText = score;
             gameActive = true;
             pickNewTarget();
